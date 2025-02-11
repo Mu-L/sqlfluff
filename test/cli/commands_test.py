@@ -1,7 +1,7 @@
 """The Test file for CLI (General)."""
 
-import configparser
 import json
+import logging
 import os
 import pathlib
 import re
@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import logging
 from unittest.mock import MagicMock, patch
 
 import chardet
@@ -24,18 +23,24 @@ from click.testing import CliRunner
 # We import the library directly here to get the version
 import sqlfluff
 from sqlfluff.cli.commands import (
-    lint,
-    version,
-    rules,
-    fix,
-    parse,
+    cli_format,
     dialects,
+    fix,
     get_config,
+    lint,
+    parse,
     render,
+    rules,
+    version,
 )
-from sqlfluff.core.rules import BaseRule, LintFix, LintResult
-from sqlfluff.core.parser.segments.raw import CommentSegment
 from sqlfluff.utils.testing.cli import invoke_assert_code
+
+# tomllib is only in the stdlib from 3.11+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover
+    import toml as tomllib
+
 
 re_ansi_escape = re.compile(r"\x1b[^m]*m")
 
@@ -73,9 +78,9 @@ def contains_ansi_escape(s: str) -> bool:
 
 
 expected_output = """== [test/fixtures/linter/indentation_error_simple.sql] FAIL
-L:   2 | P:   1 | L003 | Expected indent of 4 spaces.
-L:   5 | P:  10 | L010 | Keywords must be consistently upper case.
-L:   5 | P:  13 | L031 | Avoid aliases in from clauses and join conditions.
+L:   2 | P:   1 | LT02 | Expected indent of 4 spaces. [layout.indent]
+L:   5 | P:  10 | CP01 | Keywords must be consistently upper case.
+                       | [capitalisation.keywords]
 """
 
 
@@ -92,7 +97,7 @@ def test__cli__command_directed():
         ],
     )
     # We should get a readout of what the error was
-    check_a = "L:   2 | P:   1 | L003"
+    check_a = "L:   2 | P:   1 | LT02"
     # NB: Skip the number at the end because it's configurable
     check_b = "ndentation"
     assert check_a in result.output
@@ -119,19 +124,31 @@ def test__cli__command_dialect():
     )
 
 
-def test__cli__command_no_dialect():
+@pytest.mark.parametrize(
+    "command",
+    [
+        render,
+        parse,
+        lint,
+        cli_format,
+        fix,
+    ],
+)
+def test__cli__command_no_dialect(command):
     """Check the script raises the right exception no dialect."""
     # The dialect is unknown should be a non-zero exit code
     result = invoke_assert_code(
         ret_code=2,
         args=[
-            lint,
+            command,
             ["-"],
         ],
         cli_input="SELECT 1",
     )
     assert "User Error" in result.stdout
     assert "No dialect was specified" in result.stdout
+    # No traceback should be in the output
+    assert "Traceback (most recent call last)" not in result.stdout
 
 
 def test__cli__command_parse_error_dialect_explicit_warning():
@@ -139,7 +156,7 @@ def test__cli__command_parse_error_dialect_explicit_warning():
     # For any parsing error there should be a non-zero exit code
     # and a human-readable warning should be displayed.
     # Dialect specified as commandline option.
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=1,
         args=[
             parse,
@@ -150,10 +167,10 @@ def test__cli__command_parse_error_dialect_explicit_warning():
                 "test/fixtures/cli/fail_many.sql",
             ],
         ],
-    )
-    assert (
-        "WARNING: Parsing errors found and dialect is set to 'postgres'. "
-        "Have you configured your dialect correctly?" in result.stdout
+        assert_output_contains=(
+            "WARNING: Parsing errors found and dialect is set to 'postgres'. "
+            "Have you configured your dialect correctly?"
+        ),
     )
 
 
@@ -162,7 +179,7 @@ def test__cli__command_parse_error_dialect_implicit_warning():
     # For any parsing error there should be a non-zero exit code
     # and a human-readable warning should be displayed.
     # Dialect specified in .sqlfluff config.
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=1,
         args=[
             # Config sets dialect to tsql
@@ -174,16 +191,16 @@ def test__cli__command_parse_error_dialect_implicit_warning():
                 "test/fixtures/cli/fail_many.sql",
             ],
         ],
-    )
-    assert (
-        "WARNING: Parsing errors found and dialect is set to 'tsql'. "
-        "Have you configured your dialect correctly?" in result.stdout
+        assert_output_contains=(
+            "WARNING: Parsing errors found and dialect is set to 'tsql'. "
+            "Have you configured your dialect correctly?"
+        ),
     )
 
 
 def test__cli__command_dialect_legacy():
     """Check the script raises the right exception on a legacy dialect."""
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=2,
         args=[
             lint,
@@ -194,13 +211,13 @@ def test__cli__command_dialect_legacy():
                 "test/fixtures/linter/indentation_error_simple.sql",
             ],
         ],
+        assert_output_contains="Please use the 'exasol' dialect instead.",
     )
-    assert "Please use the 'exasol' dialect instead." in result.stdout
 
 
 def test__cli__command_extra_config_fail():
     """Check the script raises the right exception non-existent extra config path."""
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=2,
         args=[
             lint,
@@ -210,10 +227,107 @@ def test__cli__command_extra_config_fail():
                 "test/fixtures/cli/extra_config_tsql.sql",
             ],
         ],
+        assert_output_contains=(
+            "Extra config path 'test/fixtures/cli/extra_configs/.sqlfluffsdfdfdfsfd' "
+            "does not exist."
+        ),
     )
-    assert (
-        "Extra config 'test/fixtures/cli/extra_configs/.sqlfluffsdfdfdfsfd' does not "
-        "exist." in result.stdout
+
+
+stdin_cli_input = (
+    "SELECT\n    A.COL1,\n    B.COL2\nFROM TABA AS A\n" "POSITIONAL JOIN TABB AS B;\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "stdin_filepath", "ret_code", "output"),
+    [
+        (
+            parse,
+            "test/fixtures/cli/stdin_filename/without_config/stdin_filename.sql",
+            0,
+            (
+                "[L:  5, P:  1]      |                    join_clause:\n"
+                "[L:  5, P:  1]      |                        keyword:"
+                "                              'POSITIONAL'"
+            ),
+        ),
+        (
+            parse,
+            "test/fixtures/an_ansi_config_here.sql",
+            1,
+            "Parsing errors found and dialect is set to 'ansi'.",
+        ),
+        (
+            lint,
+            "test/fixtures/cli/stdin_filename/stdin_filename.sql",
+            0,
+            "All Finished!",
+        ),
+        (
+            lint,
+            "test/fixtures/cli/stdin_filename/without_config/stdin_filename.sql",
+            0,
+            "All Finished!",
+        ),
+        (
+            lint,
+            "test/fixtures/an_ansi_config_here.sql",
+            1,
+            "Parsing errors found and dialect is set to 'ansi'.",
+        ),
+        (
+            cli_format,
+            "test/fixtures/cli/stdin_filename/stdin_filename.sql",
+            0,
+            stdin_cli_input,
+        ),
+        (
+            cli_format,
+            "test/fixtures/cli/stdin_filename/without_config/stdin_filename.sql",
+            0,
+            stdin_cli_input,
+        ),
+        (
+            cli_format,
+            "test/fixtures/an_ansi_config_here.sql",
+            1,
+            "[1 templating/parsing errors found]",
+        ),
+        (
+            fix,
+            "test/fixtures/cli/stdin_filename/stdin_filename.sql",
+            0,
+            stdin_cli_input,
+        ),
+        (
+            fix,
+            "test/fixtures/cli/stdin_filename/without_config/stdin_filename.sql",
+            0,
+            stdin_cli_input,
+        ),
+        (
+            fix,
+            "test/fixtures/an_ansi_config_here.sql",
+            1,
+            "Unfixable violations detected.",
+        ),
+    ],
+)
+def test__cli__command_stdin_filename_config(command, stdin_filepath, ret_code, output):
+    """Check the script picks up the config from the indicated path."""
+    invoke_assert_code(
+        ret_code=ret_code,
+        args=[
+            command,
+            [
+                "--stdin-filename",
+                stdin_filepath,
+                "-",
+            ],
+        ],
+        cli_input=stdin_cli_input,
+        assert_output_contains=output,
     )
 
 
@@ -250,13 +364,25 @@ def test__cli__command_lint_stdin(command):
     invoke_assert_code(args=[lint, ("--dialect=ansi",) + command], cli_input=sql)
 
 
+def test__cli__command_lint_empty_stdin():
+    """Check linting an empty file raises no exceptions.
+
+    https://github.com/sqlfluff/sqlfluff/issues/4807
+    """
+    invoke_assert_code(args=[lint, ("-d", "ansi", "-")], cli_input="")
+
+
 def test__cli__command_render_stdin():
     """Check render on a simple script using stdin."""
     with open("test/fixtures/cli/passing_a.sql") as test_file:
         sql = test_file.read()
-    result = invoke_assert_code(args=[render, ("--dialect=ansi", "-")], cli_input=sql)
-    # Check we get back out the same file we input.
-    assert result.output.startswith(sql)
+
+    invoke_assert_code(
+        args=[render, ("--dialect=ansi", "-")],
+        cli_input=sql,
+        # Check we get back out the same file we input.
+        assert_output_contains=sql,
+    )
 
 
 @pytest.mark.parametrize(
@@ -269,7 +395,7 @@ def test__cli__command_render_stdin():
                 "-n",
                 "test/fixtures/cli/passing_b.sql",
                 "--exclude-rules",
-                "L051",
+                "AM05",
             ],
         ),
         # Basic render
@@ -277,6 +403,13 @@ def test__cli__command_render_stdin():
             render,
             [
                 "test/fixtures/cli/passing_b.sql",
+            ],
+        ),
+        # Render with variants
+        (
+            render,
+            [
+                "test/fixtures/cli/jinja_variants.sql",
             ],
         ),
         # Original tests from test__cli__command_lint
@@ -292,7 +425,7 @@ def test__cli__command_render_stdin():
                 "test/fixtures/cli/passing_b.sql",
                 "-vvvvvvvvvvv",
                 "--exclude-rules",
-                "L051",
+                "AM05",
             ],
         ),
         # Test basic linting with specific logger.
@@ -306,7 +439,7 @@ def test__cli__command_render_stdin():
                 "--logger",
                 "parser",
                 "-e",
-                "L051",
+                "AM05",
             ],
         ),
         # Check basic parsing
@@ -316,7 +449,7 @@ def test__cli__command_render_stdin():
                 "-n",
                 "test/fixtures/cli/passing_b.sql",
                 "--exclude-rules",
-                "L051",
+                "AM05",
             ],
         ),
         # Test basic parsing with very high verbosity
@@ -327,45 +460,49 @@ def test__cli__command_render_stdin():
                 "test/fixtures/cli/passing_b.sql",
                 "-vvvvvvvvvvv",
                 "-e",
-                "L051",
+                "AM05",
             ],
         ),
         # Check basic parsing, with the code only option
         (parse, ["-n", "test/fixtures/cli/passing_b.sql", "-c"]),
         # Check basic parsing, with the yaml output
-        (parse, ["-n", "test/fixtures/cli/passing_b.sql", "-c", "-f", "yaml"]),
+        (parse, ["-n", "test/fixtures/cli/passing_b.sql", "-c", "--format", "yaml"]),
         (parse, ["-n", "test/fixtures/cli/passing_b.sql", "--format", "yaml"]),
-        # Check the profiler and benching commands
-        (parse, ["-n", "test/fixtures/cli/passing_b.sql", "--profiler"]),
-        (parse, ["-n", "test/fixtures/cli/passing_b.sql", "--bench"]),
+        # Check parsing with no output (used mostly for testing)
+        (parse, ["-n", "test/fixtures/cli/passing_b.sql", "--format", "none"]),
+        # Parsing with variants
         (
-            lint,
+            parse,
             [
-                "-n",
-                "test/fixtures/cli/passing_b.sql",
-                "--bench",
-                "--exclude-rules",
-                "L051",
+                "test/fixtures/cli/jinja_variants.sql",
             ],
         ),
-        (
-            fix,
-            [
-                "-n",
-                "test/fixtures/cli/passing_b.sql",
-                "--bench",
-                "--exclude-rules",
-                "L051",
-            ],
-        ),
+        # Check the benching commands
+        (parse, ["-n", "test/fixtures/cli/passing_timing.sql", "--bench"]),
+        (lint, ["-n", "test/fixtures/cli/passing_timing.sql", "--bench"]),
+        (fix, ["-n", "test/fixtures/cli/passing_timing.sql", "--bench"]),
         # Check linting works in specifying rules
         (
             lint,
             [
                 "-n",
                 "--rules",
-                "L001",
+                "CP01",
                 "test/fixtures/linter/operator_errors.sql",
+            ],
+        ),
+        # Check ignoring linting (multiprocess)
+        # https://github.com/sqlfluff/sqlfluff/issues/5066
+        (
+            lint,
+            [
+                "-n",
+                "--ignore",
+                "linting",
+                "-p",
+                "2",
+                "test/fixtures/linter/operator_errors.sql",
+                "test/fixtures/linter/comma_errors.sql",
             ],
         ),
         # Check linting works in specifying multiple rules
@@ -374,7 +511,7 @@ def test__cli__command_render_stdin():
             [
                 "-n",
                 "--rules",
-                "L001,L002",
+                "CP01,LT02",
                 "test/fixtures/linter/operator_errors.sql",
             ],
         ),
@@ -384,9 +521,9 @@ def test__cli__command_render_stdin():
             [
                 "-n",
                 "--rules",
-                "L001,L006",
+                "CP01,LT01",
                 "--exclude-rules",
-                "L006,L031",
+                "LT01,AL07",
                 "test/fixtures/linter/operator_errors.sql",
             ],
         ),
@@ -396,7 +533,7 @@ def test__cli__command_render_stdin():
             [
                 "-n",
                 "--exclude-rules",
-                "L006,L007,L031,L039,L071",
+                "LT01,LT03,AL07",
                 "test/fixtures/linter/operator_errors.sql",
             ],
         ),
@@ -406,7 +543,7 @@ def test__cli__command_render_stdin():
             [
                 "-n",
                 "--exclude-rules",
-                "L003,L009,L031",
+                "LT02,LT12,AL07",
                 "--ignore",
                 "parsing,lexing",
                 "test/fixtures/linter/parse_lex_error.sql",
@@ -433,6 +570,9 @@ def test__cli__command_render_stdin():
         ),
         # Check timing outputs doesn't raise exceptions
         (lint, ["test/fixtures/cli/passing_a.sql", "--persist-timing", "test.csv"]),
+        # Check lint --help command doesn't raise exception.
+        # NOTE: This tests the LazySequence in action.
+        (lint, ["--help"]),
     ],
 )
 def test__cli__command_lint_parse(command):
@@ -450,11 +590,10 @@ def test__cli__command_lint_parse(command):
                 fix,
                 [
                     "--rules",
-                    "L001",
+                    "LT01",
                     "test/fixtures/cli/fail_many.sql",
                     "-vvvvvvv",
                 ],
-                "y",
             ),
             1,
         ),
@@ -464,12 +603,11 @@ def test__cli__command_lint_parse(command):
                 fix,
                 [
                     "--rules",
-                    "L001",
+                    "LT01",
                     "--fixed-suffix",
                     "_fix",
                     "test/fixtures/cli/fail_many.sql",
                 ],
-                "y",
             ),
             1,
         ),
@@ -482,9 +620,48 @@ def test__cli__command_lint_parse(command):
                     "_fix",
                     "test/fixtures/cli/fail_many.sql",
                 ],
-                "y",
             ),
             1,
+        ),
+        # Format
+        (
+            (
+                cli_format,
+                [
+                    "--fixed-suffix",
+                    "_fix",
+                    "test/fixtures/linter/whitespace_errors.sql",
+                ],
+            ),
+            0,
+        ),
+        # Format with --persist-timing
+        (
+            (
+                cli_format,
+                [
+                    "--fixed-suffix",
+                    "_fix",
+                    "test/fixtures/linter/whitespace_errors.sql",
+                    "--persist-timing",
+                    "test.csv",
+                ],
+            ),
+            0,
+        ),
+        # Format (specifying rules)
+        (
+            (
+                cli_format,
+                [
+                    "--rules",
+                    "LT01",
+                    "--fixed-suffix",
+                    "_fix",
+                    "test/fixtures/linter/whitespace_errors.sql",
+                ],
+            ),
+            2,
         ),
         # Template syntax error in macro file
         (
@@ -494,11 +671,74 @@ def test__cli__command_lint_parse(command):
             ),
             1,
         ),
+        # Test overriding library path when it doesn't cause an issue
+        (
+            (
+                lint,
+                ["test/fixtures/cli/passing_a.sql", "--library-path", "none"],
+            ),
+            0,
+        ),
+        # Test overriding library path when it DOES cause an issue
+        # (because macros won't be found).
+        (
+            (
+                # Render because that's the step where the issue will
+                # occur.
+                render,
+                [
+                    "test/fixtures/templater/jinja_r_library_in_macro/jinja.sql",
+                    "--library-path",
+                    "none",
+                ],
+            ),
+            1,
+        ),
         # Test render fail
         (
             (
                 render,
                 ["test/fixtures/cli/fail_many.sql"],
+            ),
+            1,
+        ),
+        # Test a longer lint fail with --bench
+        # This tests the threshold rules clause
+        (
+            (
+                lint,
+                [
+                    "test/fixtures/linter/autofix/bigquery/004_templating/before.sql",
+                    "--bench",
+                ],
+            ),
+            1,
+        ),
+        # Test that setting --quiet with --verbose raises an error.
+        (
+            (
+                fix,
+                [
+                    "--quiet",
+                    "--verbose",
+                    "test/fixtures/cli/fail_many.sql",
+                ],
+            ),
+            2,
+        ),
+        # Test machine format parse command with an unparsable file.
+        (
+            (
+                parse,
+                ["test/fixtures/linter/parse_lex_error.sql", "-f", "yaml"],
+            ),
+            1,
+        ),
+        # Test machine format parse command with a fatal templating error.
+        (
+            (
+                parse,
+                ["test/fixtures/cli/jinja_fatal_fail.sql", "-f", "yaml"],
             ),
             1,
         ),
@@ -533,14 +773,14 @@ def test__cli__command_lint_skip_ignore_files():
         ],
     )
     assert result.exit_code == 1
-    assert "L009" in result.output.strip()
+    assert "LT12" in result.output.strip()
 
 
 def test__cli__command_lint_ignore_local_config():
     """Test that --ignore-local_config ignores .sqlfluff file as expected."""
     runner = CliRunner()
     # First we test that not including the --ignore-local-config includes
-    # .sqlfluff file, and therefore the lint doesn't raise L012
+    # .sqlfluff file, and therefore the lint doesn't raise AL02
     result = runner.invoke(
         lint,
         [
@@ -548,9 +788,9 @@ def test__cli__command_lint_ignore_local_config():
         ],
     )
     assert result.exit_code == 0
-    assert "L012" not in result.output.strip()
+    assert "AL02" not in result.output.strip()
     # Then repeat the same lint but this time ignoring the .sqlfluff file.
-    # We should see L012 raised.
+    # We should see AL02 raised.
     result = runner.invoke(
         lint,
         [
@@ -560,7 +800,7 @@ def test__cli__command_lint_ignore_local_config():
         ],
     )
     assert result.exit_code == 1
-    assert "L012" in result.output.strip()
+    assert "AL02" in result.output.strip()
 
 
 def test__cli__command_lint_warning():
@@ -585,7 +825,34 @@ def test__cli__command_lint_warning():
     # But should also contain the warnings.
     # NOTE: Not including the whole description because it's too long.
     assert (
-        "L:   4 | P:   9 | L006 | WARNING: Expected single whitespace"
+        "L:   4 | P:   9 | LT01 | WARNING: Expected single whitespace"
+        in result.output.strip()
+    )
+
+
+def test__cli__command_lint_warning_name_rule():
+    """Test that configuring warnings works.
+
+    For this test the warnings are configured using
+    inline config in the file. That's more for simplicity
+    however the code paths should be the same if it's
+    configured in a file.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        lint,
+        [
+            "test/fixtures/cli/warning_name_a.sql",
+        ],
+    )
+    # Because we're only warning. The command should pass.
+    assert result.exit_code == 0
+    # The output should still say PASS.
+    assert "PASS" in result.output.strip()
+    # But should also contain the warnings.
+    # NOTE: Not including the whole description because it's too long.
+    assert (
+        "L:   4 | P:   9 | LT01 | WARNING: Expected single whitespace"
         in result.output.strip()
     )
 
@@ -595,9 +862,9 @@ def test__cli__command_versioning():
     # Get the package version info
     pkg_version = sqlfluff.__version__
     # Get the version info from the config file
-    config = configparser.ConfigParser()
-    config.read_file(open("setup.cfg"))
-    config_version = config["metadata"]["version"]
+    with open("pyproject.toml", "r") as config_file:
+        config = tomllib.loads(config_file.read())
+    config_version = config["project"]["version"]
     assert pkg_version == config_version
     # Get the version from the cli
     runner = CliRunner()
@@ -635,7 +902,7 @@ def generic_roundtrip_test(
     source_file,
     rulestring,
     final_exit_code=0,
-    force=True,
+    check=False,
     fix_input=None,
     fix_exit_code=0,
     input_file_encoding="utf-8",
@@ -663,8 +930,8 @@ def generic_roundtrip_test(
         args=[lint, ["--dialect=ansi", "--rules", rulestring, filepath]],
     )
     # Fix the file (in force mode)
-    if force:
-        fix_args = ["--rules", rulestring, "-f", filepath]
+    if check:
+        fix_args = ["--rules", rulestring, "--check", filepath]
     else:
         fix_args = ["--rules", rulestring, filepath]
     fix_args.append("--dialect=ansi")
@@ -692,11 +959,11 @@ def generic_roundtrip_test(
 @pytest.mark.parametrize(
     "rule,fname",
     [
-        ("L001", "test/fixtures/linter/indentation_errors.sql"),
-        ("L008", "test/fixtures/linter/whitespace_errors.sql"),
-        ("L008", "test/fixtures/linter/indentation_errors.sql"),
+        ("LT01", "test/fixtures/linter/indentation_errors.sql"),
+        ("LT01", "test/fixtures/linter/whitespace_errors.sql"),
+        ("LT01", "test/fixtures/linter/indentation_errors.sql"),
         # Really stretching the ability of the fixer to re-indent a file
-        ("L003", "test/fixtures/linter/indentation_error_hard.sql"),
+        ("LT02", "test/fixtures/linter/indentation_error_hard.sql"),
     ],
 )
 def test__cli__command__fix(rule, fname):
@@ -716,7 +983,7 @@ def test__cli__command__fix(rule, fname):
             FROM my_schema.my_table
             where processdate ! 3
             """,
-            ["--force", "--fixed-suffix", "FIXED", "--rules", "L010"],
+            ["--fixed-suffix", "FIXED", "--rules", "CP01"],
             None,
             1,
         ),
@@ -729,7 +996,7 @@ def test__cli__command__fix(rule, fname):
             where processdate {{ condition }}
             """,
             # Test the short versions of the options.
-            ["--force", "-x", "FIXED", "-r", "L010"],
+            ["-x", "FIXED", "-r", "CP01"],
             None,
             1,
         ),
@@ -743,7 +1010,7 @@ def test__cli__command__fix(rule, fname):
             where processdate ! 3  -- noqa: PRS
             """,
             # Test the short versions of the options.
-            ["--force", "-x", "FIXED", "-r", "L010"],
+            ["-x", "FIXED", "-r", "CP01"],
             None,
             1,
         ),
@@ -755,7 +1022,7 @@ def test__cli__command__fix(rule, fname):
             FROM my_schema.my_table
             WHERE processdate ! 3
             """,
-            ["--force", "--fixed-suffix", "FIXED", "--rules", "L010"],
+            ["--fixed-suffix", "FIXED", "--rules", "CP01"],
             None,
             1,
         ),
@@ -767,7 +1034,7 @@ def test__cli__command__fix(rule, fname):
             FROM my_schema.my_table
             WHERE processdate ! 3  --noqa: PRS
             """,
-            ["--force", "--fixed-suffix", "FIXED", "--rules", "L010"],
+            ["--fixed-suffix", "FIXED", "--rules", "CP01"],
             None,
             0,
         ),
@@ -781,11 +1048,10 @@ def test__cli__command__fix(rule, fname):
             where processdate ! 3
             """,
             [
-                "--force",
                 "--fixed-suffix",
                 "FIXED",
                 "--rules",
-                "L010",
+                "CP01",
                 "--FIX-EVEN-UNPARSABLE",
             ],
             """
@@ -815,7 +1081,7 @@ def test__cli__command__fix(rule, fname):
                 FROM my_schema.my_table
                 where processdate != 3""",
             ],
-            ["--force", "--fixed-suffix", "FIXED", "--rules", "L010"],
+            ["--fixed-suffix", "FIXED", "--rules", "CP01"],
             [
                 None,
                 """SELECT my_col
@@ -844,22 +1110,18 @@ def test__cli__fix_error_handling_behavior(sql, fix_args, fixed, exit_code, tmpd
     assert len(sql) == len(fixed)
     tmp_path = pathlib.Path(str(tmpdir))
     for idx, this_sql in enumerate(sql):
-        filepath = tmp_path / f"testing{idx+1}.sql"
+        filepath = tmp_path / f"testing{idx + 1}.sql"
         filepath.write_text(textwrap.dedent(this_sql))
     with tmpdir.as_cwd():
         with pytest.raises(SystemExit) as e:
             fix(
                 fix_args
-                + [
-                    "-f",
-                    # Use the short dialect option
-                    "-d",
-                    "ansi",
-                ]
+                # Use the short dialect option
+                + ["-d", "ansi"]
             )
         assert exit_code == e.value.code
     for idx, this_fixed in enumerate(fixed):
-        fixed_path = tmp_path / f"testing{idx+1}FIXED.sql"
+        fixed_path = tmp_path / f"testing{idx + 1}FIXED.sql"
         if this_fixed is not None:
             assert textwrap.dedent(this_fixed) == fixed_path.read_text()
         else:
@@ -895,7 +1157,6 @@ where processdate ! 3
     options = [
         "--dialect",
         "ansi",
-        "-f",
         "--fixed-suffix=FIXED",
         sql_path,
     ]
@@ -936,91 +1197,15 @@ WHERE processdate ! 3
         assert not os.path.isfile(fixed_path)
 
 
-_old_eval = BaseRule._eval
-_fix_counter = 0
-
-
-def _mock_eval(rule, context):
-    # For test__cli__fix_loop_limit_behavior, we mock BaseRule.crawl(),
-    # replacing it with this function. This function generates an infinite
-    # sequence of fixes without ever repeating the same fix. This causes the
-    # linter to hit the loop limit, allowing us to test that behavior.
-    if context.segment.is_type("comment") and "Comment" in context.segment.raw:
-        global _fix_counter
-        _fix_counter += 1
-        fix = LintFix.replace(
-            context.segment, [CommentSegment(f"-- Comment {_fix_counter}")]
-        )
-        return LintResult(context.segment, fixes=[fix])
-    else:
-        return _old_eval(rule, context)
-
-
-@pytest.mark.parametrize(
-    "sql, exit_code",
-    [
-        ("-- Comment A\nSELECT 1 FROM foo", 1),
-        ("-- noqa: disable=all\n-- Comment A\nSELECT 1 FROM foo", 0),
-    ],
-)
-@patch("sqlfluff.rules.L001.Rule_L001._eval", _mock_eval)
-def test__cli__fix_loop_limit_behavior(sql, exit_code, tmpdir):
-    """Tests how "fix" behaves when the loop limit is exceeded."""
-    fix_args = ["--force", "--fixed-suffix", "FIXED", "--rules", "L001"]
-    tmp_path = pathlib.Path(str(tmpdir))
-    filepath = tmp_path / "testing.sql"
-    filepath.write_text(textwrap.dedent(sql))
-    with tmpdir.as_cwd():
-        with pytest.raises(SystemExit) as e:
-            fix(
-                fix_args
-                + [
-                    "-f",
-                    "--dialect=ansi",
-                ]
-            )
-        assert exit_code == e.value.code
-    # In both parametrized test cases, no output file should have been
-    # created.
-    # - Case #1: Hitting the loop limit is an error
-    # - Case #2: "noqa" suppressed all lint errors, thus no fixes applied
-    fixed_path = tmp_path / "testingFIXED.sql"
-    assert not fixed_path.is_file()
-
-
-# Test case disabled because there isn't a good example of where to test this.
-# This *should* test the case where a rule DOES have a proposed fix, but for
-# some reason when we try to apply it, there's a failure.
-# @pytest.mark.parametrize('rule,fname', [
-#     # NB: L004 currently has no fix routine.
-#     ('L004', 'test/fixtures/linter/indentation_errors.sql')
-# ])
-# def test__cli__command__fix_fail(rule, fname):
-#     """Test the round trip of detecting, fixing and then still detecting the rule."""
-#     with open(fname, mode='r') as test_file:
-#         generic_roundtrip_test(test_file, rule, fix_exit_code=1, final_exit_code=65)
-
-
 @pytest.mark.parametrize(
     "stdin,rules,stdout",
     [
-        ("select * from t", "L003", "select * from t"),  # no change
+        ("select * from t", "LT02", "select * from t"),  # no change
         (
             " select * from t",
-            "L003",
+            "LT02",
             "select * from t",
         ),  # fix preceding whitespace
-        # L031 fix aliases in joins
-        (
-            "SELECT u.id, c.first_name, c.last_name, COUNT(o.user_id) "
-            "FROM users as u JOIN customers as c on u.id = c.user_id JOIN orders as o "
-            "on u.id = o.user_id;",
-            "L031",
-            "SELECT users.id, customers.first_name, customers.last_name, "
-            "COUNT(orders.user_id) "
-            "FROM users JOIN customers on users.id = customers.user_id JOIN orders on "
-            "users.id = orders.user_id;",
-        ),
     ],
 )
 def test__cli__command_fix_stdin(stdin, rules, stdout):
@@ -1035,6 +1220,47 @@ def test__cli__command_fix_stdin(stdin, rules, stdout):
     assert result.output == stdout
 
 
+@pytest.mark.parametrize(
+    "stdin,stdout",
+    [
+        ("select * from t\n", "select * from t\n"),  # no change
+        (
+            "   select    *    FRoM     t    ",
+            "select * from t\n",
+        ),
+        (
+            # Check that warnings related to parsing errors on input don't
+            # go to stdout. This query shouldn't change, but stdout should
+            # remain clean.
+            # https://github.com/sqlfluff/sqlfluff/issues/5327
+            "select\n"
+            "    count(*) over (\n"
+            "        order by a desc \n"
+            "        range between b row and '10 seconds' following  -- noqa: PRS\n"
+            "    ) as c\n"
+            "from d\n",
+            "select\n"
+            "    count(*) over (\n"
+            "        order by a desc \n"
+            "        range between b row and '10 seconds' following  -- noqa: PRS\n"
+            "    ) as c\n"
+            "from d\n",
+        ),
+    ],
+)
+def test__cli__command_format_stdin(stdin, stdout):
+    """Check stdin input for fix works."""
+    result = invoke_assert_code(
+        args=[
+            cli_format,
+            ("-", "--disable-progress-bar", "--dialect=ansi"),
+        ],
+        cli_input=stdin,
+        mix_stderr=False,
+    )
+    assert result.stdout == stdout
+
+
 def test__cli__command_fix_stdin_logging_to_stderr(monkeypatch):
     """Check that logging goes to stderr when stdin is passed to fix."""
     perfect_sql = "select col from table"
@@ -1047,7 +1273,7 @@ def test__cli__command_fix_stdin_logging_to_stderr(monkeypatch):
 
     monkeypatch.setattr(sqlfluff.cli.commands, "Linter", MockLinter)
     result = invoke_assert_code(
-        args=[fix, ("-", "--rules=L003", "--dialect=ansi")],
+        args=[fix, ("-", "--rules=LT02", "--dialect=ansi")],
         cli_input=perfect_sql,
         mix_stderr=False,
     )
@@ -1069,7 +1295,7 @@ def test__cli__command_fix_stdin_safety():
 
 
 @pytest.mark.parametrize(
-    "sql,exit_code,params,output_contains",
+    "sql,exit_code,params,assert_output_contains",
     [
         (
             "create TABLE {{ params.dsfsdfds }}.t (a int)",
@@ -1088,38 +1314,31 @@ def test__cli__command_fix_stdin_safety():
     ],
 )
 def test__cli__command_fix_stdin_error_exit_code(
-    sql, exit_code, params, output_contains
+    sql, exit_code, params, assert_output_contains
 ):
     """Check that the CLI fails nicely if fixing a templated stdin."""
-    if exit_code == 0:
-        invoke_assert_code(
-            args=[fix, ("--dialect=ansi", "-")],
-            cli_input=sql,
-        )
-    else:
-        with pytest.raises(SystemExit) as exc_info:
-            invoke_assert_code(
-                args=[fix, (params, "--dialect=ansi", "-")],
-                cli_input=sql,
-                output_contains=output_contains,
-            )
-        assert exc_info.value.args[0] == exit_code
+    invoke_assert_code(
+        ret_code=exit_code,
+        args=[fix, ((params,) if params else ()) + ("--dialect=ansi", "-")],
+        cli_input=sql,
+        assert_output_contains=assert_output_contains,
+    )
 
 
 @pytest.mark.parametrize(
     "rule,fname,prompt,exit_code,fix_exit_code",
     [
-        ("L001", "test/fixtures/linter/indentation_errors.sql", "y", 0, 0),
-        ("L001", "test/fixtures/linter/indentation_errors.sql", "n", 1, 1),
+        ("LT01", "test/fixtures/linter/indentation_errors.sql", "y", 0, 0),
+        ("LT01", "test/fixtures/linter/indentation_errors.sql", "n", 1, 1),
     ],
 )
-def test__cli__command__fix_no_force(rule, fname, prompt, exit_code, fix_exit_code):
+def test__cli__command__fix_check(rule, fname, prompt, exit_code, fix_exit_code):
     """Round trip test, using the prompts."""
     with open(fname) as test_file:
         generic_roundtrip_test(
             test_file,
             rule,
-            force=False,
+            check=True,
             final_exit_code=exit_code,
             fix_input=prompt,
             fix_exit_code=fix_exit_code,
@@ -1162,37 +1381,149 @@ def test__cli__command_parse_serialize_from_stdin(serialize, write_file, tmp_pat
     assert result["filepath"] == "stdin"
 
 
-@pytest.mark.parametrize("serialize", ["yaml", "json"])
+@pytest.mark.parametrize("serialize", ["yaml", "json", "none"])
 @pytest.mark.parametrize(
-    "sql,expected,exit_code",
+    "sql,rules,expected,exit_code",
     [
-        ("select * from tbl", [], 0),  # empty list if no violations
+        (
+            "select * from tbl",
+            "CP01",
+            [
+                {
+                    "filepath": "stdin",
+                    "statistics": {
+                        "raw_segments": 12,
+                        "segments": 24,
+                        "source_chars": 17,
+                        "templated_chars": 17,
+                    },
+                    # Empty list because no violations.
+                    "violations": [],
+                }
+            ],
+            0,
+        ),
         (
             "SElect * from tbl",
+            "CP01",
             [
                 {
                     "filepath": "stdin",
                     "violations": [
                         {
-                            "code": "L010",
-                            "line_no": 1,
-                            "line_pos": 1,
+                            "code": "CP01",
+                            "start_line_no": 1,
+                            "start_line_pos": 1,
+                            "start_file_pos": 0,
+                            "end_line_no": 1,
+                            "end_line_pos": 7,
+                            "end_file_pos": 6,
                             "description": "Keywords must be consistently upper case.",
+                            "name": "capitalisation.keywords",
+                            "warning": False,
+                            "fixes": [
+                                {
+                                    "type": "replace",
+                                    "edit": "SELECT",
+                                    "start_line_no": 1,
+                                    "start_line_pos": 1,
+                                    "start_file_pos": 0,
+                                    "end_line_no": 1,
+                                    "end_line_pos": 7,
+                                    "end_file_pos": 6,
+                                }
+                            ],
                         },
                         {
-                            "code": "L010",
-                            "line_no": 1,
-                            "line_pos": 10,
+                            "code": "CP01",
+                            "start_line_no": 1,
+                            "start_line_pos": 10,
+                            "start_file_pos": 9,
+                            "end_line_no": 1,
+                            "end_line_pos": 14,
+                            "end_file_pos": 13,
                             "description": "Keywords must be consistently upper case.",
+                            "name": "capitalisation.keywords",
+                            "warning": False,
+                            "fixes": [
+                                {
+                                    "type": "replace",
+                                    "edit": "FROM",
+                                    "start_line_no": 1,
+                                    "start_line_pos": 10,
+                                    "start_file_pos": 9,
+                                    "end_line_no": 1,
+                                    "end_line_pos": 14,
+                                    "end_file_pos": 13,
+                                }
+                            ],
                         },
                     ],
+                    "statistics": {
+                        "raw_segments": 12,
+                        "segments": 24,
+                        "source_chars": 17,
+                        "templated_chars": 17,
+                    },
+                    # NOTE: There will be a timings section too, but we're not
+                    # going to test that.
+                }
+            ],
+            1,
+        ),
+        # Test serialisation with a source only fix.
+        (
+            "SELECT {{1}}",
+            "JJ01",
+            [
+                {
+                    "filepath": "stdin",
+                    "violations": [
+                        {
+                            "code": "JJ01",
+                            "start_line_no": 1,
+                            "start_line_pos": 8,
+                            "start_file_pos": 7,
+                            "end_line_no": 1,
+                            "end_line_pos": 13,
+                            "end_file_pos": 12,
+                            "description": (
+                                "Jinja tags should have a single whitespace on "
+                                "either side: {{1}}"
+                            ),
+                            "name": "jinja.padding",
+                            "warning": False,
+                            "fixes": [
+                                {
+                                    "type": "replace",
+                                    "edit": "{{ 1 }}",
+                                    "start_line_no": 1,
+                                    "start_line_pos": 8,
+                                    "start_file_pos": 7,
+                                    "end_line_no": 1,
+                                    "end_line_pos": 13,
+                                    "end_file_pos": 12,
+                                }
+                            ],
+                        },
+                    ],
+                    "statistics": {
+                        "raw_segments": 6,
+                        "segments": 11,
+                        "source_chars": 12,
+                        "templated_chars": 8,
+                    },
+                    # NOTE: There will be a timings section too, but we're not
+                    # going to test that.
                 }
             ],
             1,
         ),
     ],
 )
-def test__cli__command_lint_serialize_from_stdin(serialize, sql, expected, exit_code):
+def test__cli__command_lint_serialize_from_stdin(
+    serialize, sql, rules, expected, exit_code
+):
     """Check an explicit serialized return value for a single error."""
     result = invoke_assert_code(
         args=[
@@ -1200,7 +1531,7 @@ def test__cli__command_lint_serialize_from_stdin(serialize, sql, expected, exit_
             (
                 "-",
                 "--rules",
-                "L010",
+                rules,
                 "--format",
                 serialize,
                 "--disable-progress-bar",
@@ -1212,9 +1543,21 @@ def test__cli__command_lint_serialize_from_stdin(serialize, sql, expected, exit_
     )
 
     if serialize == "json":
-        assert json.loads(result.output) == expected
+        result = json.loads(result.output)
+        # Drop any timing section (because it's less determinate)
+        for record in result:
+            if "timings" in record:
+                del record["timings"]
+        assert result == expected
     elif serialize == "yaml":
-        assert yaml.safe_load(result.output) == expected
+        result = yaml.safe_load(result.output)
+        # Drop any timing section (because it's less determinate)
+        for record in result:
+            if "timings" in record:
+                del record["timings"]
+        assert result == expected
+    elif serialize == "none":
+        assert result.output == ""
     else:
         raise Exception
 
@@ -1228,11 +1571,14 @@ def test__cli__command_lint_serialize_from_stdin(serialize, sql, expected, exit_
 )
 def test__cli__command_fail_nice_not_found(command):
     """Check commands fail as expected when then don't find files."""
-    result = invoke_assert_code(args=command, ret_code=2)
-    assert (
-        "User Error: Specified path does not exist. Check it/they "
-        "exist(s): this_file_does_not_exist.sql"
-    ) in result.output
+    invoke_assert_code(
+        args=command,
+        ret_code=2,
+        assert_output_contains=(
+            "User Error: Specified path does not exist. Check it/they "
+            "exist(s): this_file_does_not_exist.sql"
+        ),
+    )
 
 
 @patch("click.utils.should_strip_ansi")
@@ -1267,7 +1613,7 @@ def test__cli__command_lint_nocolor(isatty, should_strip_ansi, capsys, tmpdir):
 
 @pytest.mark.parametrize(
     "serialize",
-    ["human", "yaml", "json", "github-annotation", "github-annotation-native"],
+    ["human", "yaml", "json", "github-annotation", "github-annotation-native", "none"],
 )
 @pytest.mark.parametrize("write_file", [None, "outfile"])
 def test__cli__command_lint_serialize_multiple_files(serialize, write_file, tmp_path):
@@ -1300,7 +1646,8 @@ def test__cli__command_lint_serialize_multiple_files(serialize, write_file, tmp_
         ret_code=1,
     )
 
-    if write_file:
+    # NOTE: The "none" serializer doesn't write a file even if specified.
+    if write_file and serialize != "none":
         with open(target_file, "r") as payload_file:
             result_payload = payload_file.read()
     else:
@@ -1314,7 +1661,9 @@ def test__cli__command_lint_serialize_multiple_files(serialize, write_file, tmp_
     print("Result length:", payload_length)
 
     if serialize == "human":
-        assert payload_length == 25 if write_file else 32
+        assert payload_length == 25 if write_file else 34
+    elif serialize == "none":
+        assert payload_length == 1  # There will be a single newline.
     elif serialize == "json":
         result = json.loads(result_payload)
         assert len(result) == 2
@@ -1330,7 +1679,7 @@ def test__cli__command_lint_serialize_multiple_files(serialize, write_file, tmp_
         # SQLFluff produces trailing newline
         if result[-1] == "":
             del result[-1]
-        assert len(result) == 18
+        assert len(result) == 16
     else:
         raise Exception
 
@@ -1360,24 +1709,12 @@ def test__cli__command_lint_serialize_github_annotation():
             "file": os.path.normpath(
                 "test/fixtures/linter/identifier_capitalisation.sql"
             ),
-            "line": 1,
-            "message": "L036: Select targets should be on a new line unless there is "
-            "only one select target.",
-            "start_column": 1,
-            "end_column": 1,
-            "title": "SQLFluff",
-        },
-        {
-            "annotation_level": "warning",
-            # Normalise paths to control for OS variance
-            "file": os.path.normpath(
-                "test/fixtures/linter/identifier_capitalisation.sql"
-            ),
-            "line": 2,
-            "message": "L027: Unqualified reference 'foo' found in select with more "
+            "start_line": 3,
+            "end_line": 3,
+            "message": "RF02: Unqualified reference 'foo' found in select with more "
             "than one referenced table/view.",
             "start_column": 5,
-            "end_column": 5,
+            "end_column": 8,
             "title": "SQLFluff",
         },
         {
@@ -1386,34 +1723,11 @@ def test__cli__command_lint_serialize_github_annotation():
             "file": os.path.normpath(
                 "test/fixtures/linter/identifier_capitalisation.sql"
             ),
-            "line": 3,
-            "message": "L012: Implicit/explicit aliasing of columns.",
-            "start_column": 5,
-            "end_column": 5,
-            "title": "SQLFluff",
-        },
-        {
-            "annotation_level": "warning",
-            # Normalise paths to control for OS variance
-            "file": os.path.normpath(
-                "test/fixtures/linter/identifier_capitalisation.sql"
-            ),
-            "line": 3,
-            "message": "L014: Unquoted identifiers must be consistently lower case.",
-            "start_column": 5,
-            "end_column": 5,
-            "title": "SQLFluff",
-        },
-        {
-            "annotation_level": "warning",
-            # Normalise paths to control for OS variance
-            "file": os.path.normpath(
-                "test/fixtures/linter/identifier_capitalisation.sql"
-            ),
-            "line": 4,
-            "message": "L010: Keywords must be consistently lower case.",
+            "start_line": 4,
+            "end_line": 4,
+            "message": "LT02: Expected indent of 8 spaces.",
             "start_column": 1,
-            "end_column": 1,
+            "end_column": 5,
             "title": "SQLFluff",
         },
         {
@@ -1422,10 +1736,51 @@ def test__cli__command_lint_serialize_github_annotation():
             "file": os.path.normpath(
                 "test/fixtures/linter/identifier_capitalisation.sql"
             ),
-            "line": 4,
-            "message": "L014: Unquoted identifiers must be consistently lower case.",
+            "start_line": 4,
+            "end_line": 4,
+            "message": "AL02: Implicit/explicit aliasing of columns.",
+            "start_column": 5,
+            "end_column": 8,
+            "title": "SQLFluff",
+        },
+        {
+            "annotation_level": "warning",
+            # Normalise paths to control for OS variance
+            "file": os.path.normpath(
+                "test/fixtures/linter/identifier_capitalisation.sql"
+            ),
+            "start_line": 4,
+            "end_line": 4,
+            "message": "CP02: Unquoted identifiers must be consistently lower case.",
+            "start_column": 5,
+            "end_column": 8,
+            "title": "SQLFluff",
+        },
+        {
+            # Warnings should come through as notices.
+            "annotation_level": "notice",
+            # Normalise paths to control for OS variance
+            "file": os.path.normpath(
+                "test/fixtures/linter/identifier_capitalisation.sql"
+            ),
+            "start_line": 5,
+            "end_line": 5,
+            "message": "CP01: Keywords must be consistently lower case.",
+            "start_column": 1,
+            "end_column": 5,
+            "title": "SQLFluff",
+        },
+        {
+            "annotation_level": "warning",
+            # Normalise paths to control for OS variance
+            "file": os.path.normpath(
+                "test/fixtures/linter/identifier_capitalisation.sql"
+            ),
+            "start_line": 5,
+            "end_line": 5,
+            "message": "CP02: Unquoted identifiers must be consistently lower case.",
             "start_column": 12,
-            "end_column": 12,
+            "end_column": 16,
             "title": "SQLFluff",
         },
         {
@@ -1434,26 +1789,82 @@ def test__cli__command_lint_serialize_github_annotation():
             "file": os.path.normpath(
                 "test/fixtures/linter/identifier_capitalisation.sql"
             ),
-            "line": 4,
-            "message": "L014: Unquoted identifiers must be consistently lower case.",
+            "start_line": 5,
+            "end_line": 5,
+            "message": "CP02: Unquoted identifiers must be consistently lower case.",
             "start_column": 18,
-            "end_column": 18,
+            "end_column": 22,
             "title": "SQLFluff",
         },
     ]
 
 
-def test__cli__command_lint_serialize_github_annotation_native():
+@pytest.mark.parametrize(
+    "filename,expected_output",
+    [
+        (
+            "test/fixtures/linter/identifier_capitalisation.sql",
+            (
+                "::group::{filename}\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=3,col=5,endLine=3,endColumn=8::"
+                "RF02: Unqualified reference 'foo' found in select with more than one "
+                "referenced table/view. [references.qualification]\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=4,col=1,endLine=4,endColumn=5::"
+                "LT02: Expected indent of 8 spaces. [layout.indent]\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=4,col=5,endLine=4,endColumn=8::"
+                "AL02: Implicit/explicit aliasing of columns. [aliasing.column]\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=4,col=5,endLine=4,endColumn=8::"
+                "CP02: Unquoted identifiers must be consistently lower case. "
+                "[capitalisation.identifiers]\n"
+                # Warnings should always come through as notices.
+                "::notice title=SQLFluff,file={filename},"
+                "line=5,col=1,endLine=5,endColumn=5::"
+                "CP01: Keywords must be consistently lower case. "
+                "[capitalisation.keywords]\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=5,col=12,endLine=5,endColumn=16::"
+                "CP02: Unquoted identifiers must be consistently lower case. "
+                "[capitalisation.identifiers]\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=5,col=18,endLine=5,endColumn=22::"
+                "CP02: Unquoted identifiers must be consistently lower case. "
+                "[capitalisation.identifiers]\n"
+                "::endgroup::\n"
+                # SQLFluff produces trailing newline
+            ),
+        ),
+        (
+            "test/fixtures/linter/jinja_spacing.sql",
+            (
+                "::group::{filename}\n"
+                "::error title=SQLFluff,file={filename},"
+                "line=3,col=15,endLine=3,endColumn=22::JJ01: "
+                "Jinja tags should have a single whitespace on either "
+                # NOTE: Double escaping, because we're going to pass this through a
+                # .format() method.
+                "side: {{{{foo}}}} "
+                "[jinja.padding]\n"
+                "::endgroup::\n"
+            ),
+        ),
+    ],
+)
+def test__cli__command_lint_serialize_github_annotation_native(
+    filename, expected_output
+):
     """Test format of github-annotation output."""
-    fpath = "test/fixtures/linter/identifier_capitalisation.sql"
     # Normalise paths to control for OS variance
-    fpath_normalised = os.path.normpath(fpath)
+    fpath_normalised = os.path.normpath(filename)
 
     result = invoke_assert_code(
         args=[
             lint,
             (
-                fpath,
+                filename,
                 "--format",
                 "github-annotation-native",
                 "--annotation-level",
@@ -1463,28 +1874,7 @@ def test__cli__command_lint_serialize_github_annotation_native():
         ],
         ret_code=1,
     )
-
-    assert result.output == "\n".join(
-        [
-            f"::error title=SQLFluff,file={fpath_normalised},line=1,col=1::"
-            "L036: Select targets should be on a new line unless there is only one "
-            "select target.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=2,col=5::"
-            "L027: Unqualified reference 'foo' found in select with more than one "
-            "referenced table/view.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=3,col=5::"
-            "L012: Implicit/explicit aliasing of columns.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=3,col=5::"
-            "L014: Unquoted identifiers must be consistently lower case.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=4,col=1::"
-            "L010: Keywords must be consistently lower case.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=4,col=12::"
-            "L014: Unquoted identifiers must be consistently lower case.",
-            f"::error title=SQLFluff,file={fpath_normalised},line=4,col=18::"
-            "L014: Unquoted identifiers must be consistently lower case.",
-            "",  # SQLFluff produces trailing newline
-        ]
-    )
+    assert result.output == expected_output.format(filename=fpath_normalised)
 
 
 @pytest.mark.parametrize("serialize", ["github-annotation", "github-annotation-native"])
@@ -1547,7 +1937,7 @@ def test_encoding(encoding_in, encoding_out):
     with open("test/fixtures/linter/indentation_errors.sql", "r") as testfile:
         generic_roundtrip_test(
             testfile,
-            "L001",
+            "LT01",
             input_file_encoding=encoding_in,
             output_file_encoding=encoding_out,
         )
@@ -1590,7 +1980,7 @@ def test_cli_encoding(encoding, method, expect_success, tmpdir):
 
 
 def test_cli_no_disable_noqa_flag():
-    """Test that unset --disable_noqa flag respects inline noqa comments."""
+    """Test that unset --disable-noqa flag respects inline noqa comments."""
     invoke_assert_code(
         ret_code=0,
         args=[
@@ -1601,8 +1991,8 @@ def test_cli_no_disable_noqa_flag():
 
 
 def test_cli_disable_noqa_flag():
-    """Test that --disable_noqa flag ignores inline noqa comments."""
-    result = invoke_assert_code(
+    """Test that --disable-noqa flag ignores inline noqa comments."""
+    invoke_assert_code(
         ret_code=1,
         args=[
             lint,
@@ -1611,11 +2001,63 @@ def test_cli_disable_noqa_flag():
                 "--disable-noqa",
             ],
         ],
+        # Linting error is raised even though it is inline ignored.
+        assert_output_contains=r"L:   6 | P:  11 | CP01 |",
     )
-    raw_output = repr(result.output)
 
-    # Linting error is raised even though it is inline ignored.
-    assert r"L:   5 | P:  11 | L010 |" in raw_output
+
+def test_cli_disable_noqa_except_flag():
+    """Test that --disable-noqa-except flag ignores inline noqa comments."""
+    result = invoke_assert_code(
+        ret_code=1,
+        args=[
+            lint,
+            [
+                "test/fixtures/cli/disable_noqa_test.sql",
+                "--disable-noqa-except",
+                "CP01",
+            ],
+        ],
+        # Linting error is raised even though it is inline ignored.
+        assert_output_contains=r"L:   8 | P:   5 | CP03 |",
+    )
+    assert r"L:   6 | P:  11 | CP01 |" not in result.output
+
+
+def test_cli_disable_noqa_except_non_rules_flag():
+    """Test that --disable-noqa-except flag ignores all inline noqa comments."""
+    invoke_assert_code(
+        ret_code=1,
+        args=[
+            lint,
+            [
+                "test/fixtures/cli/disable_noqa_test.sql",
+                "--disable-noqa-except",
+                "None",
+            ],
+        ],
+        # Linting error is raised even though it is inline ignored.
+        assert_output_contains=r"L:   6 | P:  11 | CP01 |",
+    )
+
+
+def test_cli_warn_unused_noqa_flag():
+    """Test that --warn-unused-ignores flag works."""
+    invoke_assert_code(
+        # Return value should still be success.
+        ret_code=0,
+        args=[
+            lint,
+            [
+                "test/fixtures/cli/disable_noqa_test.sql",
+                "--warn-unused-ignores",
+            ],
+        ],
+        # Warning shown.
+        assert_output_contains=(
+            r"L:   5 | P:  18 | NOQA | WARNING: Unused noqa: 'noqa: CP01'"
+        ),
+    )
 
 
 def test_cli_get_default_config():
@@ -1665,29 +2107,6 @@ class TestProgressBars:
         assert "\rparsing: 0it" not in raw_output
         assert "\r\rlint by rules:" not in raw_output
 
-    def test_cli_lint_disabled_progress_bar_deprecated_option(
-        self, mock_disable_progress_bar: MagicMock
-    ) -> None:
-        """Same as above but checks additionally if deprecation warning is printed."""
-        result = invoke_assert_code(
-            args=[
-                lint,
-                [
-                    "--disable_progress_bar",
-                    "test/fixtures/linter/passing.sql",
-                ],
-            ],
-        )
-        raw_output = repr(result.output)
-
-        assert "\rpath test/fixtures/linter/passing.sql:" not in raw_output
-        assert "\rparsing: 0it" not in raw_output
-        assert "\r\rlint by rules:" not in raw_output
-        assert (
-            "DeprecationWarning: The option '--disable_progress_bar' is deprecated, "
-            "use '--disable-progress-bar'"
-        ) in raw_output
-
     def test_cli_lint_enabled_progress_bar(
         self, mock_disable_progress_bar: MagicMock
     ) -> None:
@@ -1703,8 +2122,8 @@ class TestProgressBars:
         raw_output = repr(result.output)
 
         assert r"\rlint by rules:" in raw_output
-        assert r"\rrule L001:" in raw_output
-        assert r"\rrule L049:" in raw_output
+        assert r"\rrule LT01:" in raw_output
+        assert r"\rrule CV05:" in raw_output
 
     def test_cli_lint_enabled_progress_bar_multiple_paths(
         self, mock_disable_progress_bar: MagicMock
@@ -1720,21 +2139,15 @@ class TestProgressBars:
                 ],
             ],
         )
-        raw_output = repr(result.output)
+        normalised_output = repr(result.output.replace("\\", "/"))
 
-        sep = os.sep
-        if sys.platform == "win32":
-            sep *= 2
+        assert r"\rfile test/fixtures/linter/passing.sql:" in normalised_output
         assert (
-            r"\rfile test/fixtures/linter/passing.sql:".replace("/", sep) in raw_output
+            r"\rfile test/fixtures/linter/indentation_errors.sql:" in normalised_output
         )
-        assert (
-            r"\rfile test/fixtures/linter/indentation_errors.sql:".replace("/", sep)
-            in raw_output
-        )
-        assert r"\rlint by rules:" in raw_output
-        assert r"\rrule L001:" in raw_output
-        assert r"\rrule L049:" in raw_output
+        assert r"\rlint by rules:" in normalised_output
+        assert r"\rrule LT01:" in normalised_output
+        assert r"\rrule CV05:" in normalised_output
 
     def test_cli_lint_enabled_progress_bar_multiple_files(
         self, mock_disable_progress_bar: MagicMock
@@ -1772,55 +2185,17 @@ class TestProgressBars:
             in raw_output
         )
         assert r"\rlint by rules:" in raw_output
-        assert r"\rrule L001:" in raw_output
-        assert r"\rrule L049:" in raw_output
-
-    def test_cli_fix_disabled_progress_bar(
-        self, mock_disable_progress_bar: MagicMock
-    ) -> None:
-        """When progress bar is disabled, nothing should be printed into output."""
-        result = invoke_assert_code(
-            args=[
-                fix,
-                [
-                    "--disable-progress-bar",
-                    "test/fixtures/linter/passing.sql",
-                ],
-            ],
-        )
-        raw_output = repr(result.output)
-
-        assert (
-            "DeprecationWarning: The option '--disable_progress_bar' is deprecated, "
-            "use '--disable-progress-bar'"
-        ) not in raw_output
-
-    def test_cli_fix_disabled_progress_bar_deprecated_option(
-        self, mock_disable_progress_bar: MagicMock
-    ) -> None:
-        """Same as above but checks additionally if deprecation warning is printed."""
-        result = invoke_assert_code(
-            args=[
-                fix,
-                [
-                    "--disable_progress_bar",
-                    "test/fixtures/linter/passing.sql",
-                ],
-            ],
-        )
-        raw_output = repr(result.output)
-
-        assert (
-            "DeprecationWarning: The option '--disable_progress_bar' is deprecated, "
-            "use '--disable-progress-bar'"
-        ) in raw_output
+        assert r"\rrule LT01:" in raw_output
+        assert r"\rrule CV05:" in raw_output
 
 
 multiple_expected_output = """==== finding fixable violations ====
 == [test/fixtures/linter/multiple_sql_errors.sql] FAIL
-L:  12 | P:   1 | L003 | Expected indent of 4 spaces.
+L:  12 | P:   1 | LT02 | Expected indent of 4 spaces. [layout.indent]
+L:  40 | P:  10 | ST09 | Joins should list the table referenced earlier first.
+                       | [structure.join_condition_order]
 ==== fixing violations ====
-1 fixable linting violations found
+2 fixable linting violations found
 Are you sure you wish to attempt to fix these? [Y/n] ...
 Invalid input, please enter 'Y' or 'N'
 Aborting...
@@ -1829,27 +2204,70 @@ Aborting...
 
 
 def test__cli__fix_multiple_errors_no_show_errors():
-    """Basic checking of lint functionality."""
-    result = invoke_assert_code(
+    """Test the fix output."""
+    invoke_assert_code(
         ret_code=1,
+        args=[
+            fix,
+            [
+                "--check",  # Run in check mode to get the confirmation.
+                "--disable-progress-bar",
+                "test/fixtures/linter/multiple_sql_errors.sql",
+            ],
+        ],
+        assert_output_contains=multiple_expected_output,
+    )
+
+
+def test__cli__fix_multiple_errors_quiet_force():
+    """Test the fix --quiet option with --force."""
+    invoke_assert_code(
+        ret_code=0,
         args=[
             fix,
             [
                 "--disable-progress-bar",
                 "test/fixtures/linter/multiple_sql_errors.sql",
+                "--quiet",
+                "-x",
+                "_fix",
             ],
         ],
+        assert_output_contains=(
+            """== [test/fixtures/linter/multiple_sql_errors.sql] FIXED
+2 fixable linting violations found"""
+        ),
     )
-    # We should get a readout of what the error was
-    check_a = "4 unfixable linting violations found"
-    assert check_a in result.output
-    # Finally check the WHOLE output to make sure that unexpected newlines are not
-    # added. The replace command just accounts for cross platform testing.
-    assert result.output.replace("\\", "/").startswith(multiple_expected_output)
+
+
+def test__cli__fix_multiple_errors_quiet_check():
+    """Test the fix --quiet option without --force."""
+    invoke_assert_code(
+        ret_code=0,
+        args=[
+            fix,
+            [
+                "--disable-progress-bar",
+                "test/fixtures/linter/multiple_sql_errors.sql",
+                "--check",  # Run in check mode to get the confirmation.
+                "--quiet",
+                "-x",
+                "_fix",
+            ],
+            # Test with the confirmation step.
+            "y",
+        ],
+        assert_output_contains=(
+            """2 fixable linting violations found
+Are you sure you wish to attempt to fix these? [Y/n] ...
+== [test/fixtures/linter/multiple_sql_errors.sql] FIXED
+All Finished"""
+        ),
+    )
 
 
 def test__cli__fix_multiple_errors_show_errors():
-    """Basic checking of lint functionality."""
+    """Test the fix --show-lint-violations option."""
     result = invoke_assert_code(
         ret_code=1,
         args=[
@@ -1858,6 +2276,7 @@ def test__cli__fix_multiple_errors_show_errors():
                 "--disable-progress-bar",
                 "--show-lint-violations",
                 "test/fixtures/linter/multiple_sql_errors.sql",
+                "--check",  # Run in check mode to get the confirmation.
             ],
         ],
     )
@@ -1866,23 +2285,61 @@ def test__cli__fix_multiple_errors_show_errors():
     assert check_a in result.output
     # Finally check the WHOLE output to make sure that unexpected newlines are not
     # added. The replace command just accounts for cross platform testing.
-    assert "L:  12 | P:   1 | L003 | Expected indent of 4 spaces." in result.output
+    assert "L:  12 | P:   1 | LT02 | Expected indent of 4 spaces." in result.output
     assert (
-        "L:  36 | P:   9 | L027 | Unqualified reference 'package_id' found in "
+        "L:  36 | P:   9 | RF02 | Unqualified reference 'package_id' found in "
         "select with more than" in result.output
     )
     assert (
-        "L:  45 | P:  17 | L027 | Unqualified reference 'owner_type' found in "
+        "L:  45 | P:  17 | RF02 | Unqualified reference 'owner_type' found in "
         "select with more than" in result.output
     )
     assert (
-        "L:  45 | P:  50 | L027 | Unqualified reference 'app_key' found in "
+        "L:  45 | P:  50 | RF02 | Unqualified reference 'app_key' found in "
         "select with more than one" in result.output
     )
     assert (
-        "L:  42 | P:  45 | L027 | Unqualified reference 'owner_id' found in "
+        "L:  42 | P:  45 | RF02 | Unqualified reference 'owner_id' found in "
         "select with more than" in result.output
     )
+
+
+def test__cli__fix_show_parse_errors():
+    """Test the fix --show-lint-violations option with parser error."""
+    result = invoke_assert_code(
+        ret_code=1,
+        args=[
+            fix,
+            [
+                "--show-lint-violations",
+                "test/fixtures/linter/parse_lex_error.sql",
+            ],
+        ],
+    )
+    check_a = "1 templating/parsing errors found"
+    assert check_a not in result.output
+    assert (
+        "L:   9 | P:  21 |  PRS | Couldn't find closing bracket for opening bracket."
+        in result.output
+    )
+    assert "L:   9 | P:  22 |  LXR | Unable to lex characters: " in result.output
+
+    # Calling without show-lint-violations
+    result = invoke_assert_code(
+        ret_code=1,
+        args=[
+            fix,
+            [
+                "test/fixtures/linter/parse_lex_error.sql",
+            ],
+        ],
+    )
+    assert check_a in result.output
+    assert (
+        "L:   9 | P:  21 |  PRS | Couldn't find closing bracket for opening bracket."
+        not in result.output
+    )
+    assert "L:   9 | P:  22 |  LXR | Unable to lex characters: " not in result.output
 
 
 def test__cli__multiple_files__fix_multiple_errors_show_errors():
@@ -1895,6 +2352,7 @@ def test__cli__multiple_files__fix_multiple_errors_show_errors():
             fix,
             [
                 "--disable-progress-bar",
+                "--check",  # Run in check mode to get the confirmation.
                 "--show-lint-violations",
                 sql_path,
                 indent_path,
@@ -1918,11 +2376,7 @@ def test__cli__multiple_files__fix_multiple_errors_show_errors():
 
 def test__cli__render_fail():
     """Basic how render fails."""
-    expected_render_output = (
-        "L:   3 | P:   8 |  TMP | Undefined jinja template " "variable: 'something'"
-    )
-
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=1,
         args=[
             render,
@@ -1930,17 +2384,15 @@ def test__cli__render_fail():
                 "test/fixtures/cli/fail_many.sql",
             ],
         ],
+        assert_output_contains=(
+            "L:   3 | P:   8 |  TMP | Undefined jinja template " "variable: 'something'"
+        ),
     )
-    # Check whole output. The replace command just accounts for
-    # cross platform testing.
-    assert result.output.replace("\\", "/").startswith(expected_render_output)
 
 
 def test__cli__render_pass():
     """Basic how render works."""
-    expected_render_output = "SELECT 56 FROM sch1.tbl2"
-
-    result = invoke_assert_code(
+    invoke_assert_code(
         ret_code=0,
         args=[
             render,
@@ -1948,7 +2400,5 @@ def test__cli__render_pass():
                 "test/fixtures/templater/jinja_a/jinja.sql",
             ],
         ],
+        assert_output_contains="SELECT 56 FROM sch1.tbl2",
     )
-    # Check whole output. The replace command just accounts for
-    # cross platform testing.
-    assert result.output.replace("\\", "/").startswith(expected_render_output)

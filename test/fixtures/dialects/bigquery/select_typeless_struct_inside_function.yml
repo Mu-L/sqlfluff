@@ -3,7 +3,7 @@
 # computed by SQLFluff when running the tests. Please run
 # `python test/generate_parse_fixture_yml.py`  to generate them after adding or
 # altering SQL files.
-_hash: 7c04ee8c9f925904cdc9cb7e006f1bb3fcc6b131a147151e2d9d0c2b74af92ac
+_hash: 5358c30fd843f560b294a3541feb35320ba4a59c406cb2763c79a70ef53fb452
 file:
 - statement:
     select_statement:
@@ -11,24 +11,28 @@ file:
         keyword: SELECT
         select_clause_element:
           expression:
-            typeless_struct:
-              keyword: STRUCT
-              bracketed:
-                start_bracket: (
-                expression:
-                  typeless_struct:
-                    keyword: STRUCT
-                    bracketed:
-                      start_bracket: (
-                      numeric_literal: '1'
-                      alias_expression:
-                        keyword: AS
-                        naked_identifier: b
-                      end_bracket: )
-                alias_expression:
-                  keyword: AS
-                  naked_identifier: a
-                end_bracket: )
+            typed_struct_literal:
+              struct_type:
+                keyword: STRUCT
+              struct_literal:
+                bracketed:
+                  start_bracket: (
+                  expression:
+                    typed_struct_literal:
+                      struct_type:
+                        keyword: STRUCT
+                      struct_literal:
+                        bracketed:
+                          start_bracket: (
+                          numeric_literal: '1'
+                          alias_expression:
+                            keyword: AS
+                            naked_identifier: b
+                          end_bracket: )
+                  alias_expression:
+                    keyword: AS
+                    naked_identifier: a
+                  end_bracket: )
           alias_expression:
             keyword: AS
             naked_identifier: foo
@@ -41,26 +45,29 @@ file:
           function:
             function_name:
               function_name_identifier: ARRAY_AGG
-            bracketed:
-              start_bracket: (
-              expression:
-                typeless_struct:
-                  keyword: STRUCT
-                  bracketed:
-                  - start_bracket: (
-                  - column_reference:
-                      naked_identifier: a
-                  - alias_expression:
-                      keyword: AS
-                      naked_identifier: a
-                  - comma: ','
-                  - column_reference:
-                      naked_identifier: b
-                  - alias_expression:
-                      keyword: AS
-                      naked_identifier: b
-                  - end_bracket: )
-              end_bracket: )
+            function_contents:
+              bracketed:
+                start_bracket: (
+                expression:
+                  typed_struct_literal:
+                    struct_type:
+                      keyword: STRUCT
+                    struct_literal:
+                      bracketed:
+                      - start_bracket: (
+                      - column_reference:
+                          naked_identifier: a
+                      - alias_expression:
+                          keyword: AS
+                          naked_identifier: a
+                      - comma: ','
+                      - column_reference:
+                          naked_identifier: b
+                      - alias_expression:
+                          keyword: AS
+                          naked_identifier: b
+                      - end_bracket: )
+                end_bracket: )
       from_clause:
         keyword: FROM
         from_expression:

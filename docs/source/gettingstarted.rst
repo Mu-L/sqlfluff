@@ -43,7 +43,9 @@ If however, you do have python installed but not :code:`pip`, then
 the best instructions for what to do next are `on the python website`_.
 
 .. _`instructions for all platforms here`: https://wiki.python.org/moin/BeginnersGuide/Download
-.. _`on the python website`: https://pip.pypa.io/en/stable/installing/
+.. _`on the python website`: https://pip.pypa.io/en/stable/installation/
+
+.. _installingsqlfluff:
 
 Installing SQLFluff
 -------------------
@@ -61,7 +63,7 @@ version number.
 .. code-block:: text
 
     $ sqlfluff version
-    2.0.0a3
+    3.3.1
 
 Basic Usage
 -----------
@@ -83,22 +85,33 @@ file.
 
     $ sqlfluff lint test.sql --dialect ansi
     == [test.sql] FAIL
-    L:   1 | P:   1 | L034 | Select wildcards then simple targets before calculations
-                           | and aggregates.
-    L:   1 | P:   1 | L036 | Select targets should be on a new line unless there is
+    L:   1 | P:   1 | LT09 | Select targets should be on a new line unless there is
                            | only one select target.
-    L:   1 | P:   9 | L006 | Missing whitespace before +
-    L:   1 | P:   9 | L006 | Missing whitespace after +
-    L:   1 | P:  11 | L039 | Unnecessary whitespace found.
-    L:   2 | P:   1 | L003 | Expected 1 indentations, found 0 [compared to line 01]
-    L:   2 | P:  10 | L010 | Keywords must be consistently upper case.
+                           | [layout.select_targets]
+    L:   1 | P:   1 | ST06 | Select wildcards then simple targets before calculations
+                           | and aggregates. [structure.column_order]
+    L:   1 | P:   7 | LT02 | Expected line break and indent of 4 spaces before 'a'.
+                           | [layout.indent]
+    L:   1 | P:   9 | LT01 | Expected single whitespace between naked identifier and
+                           | binary operator '+'. [layout.spacing]
+    L:   1 | P:  10 | LT01 | Expected single whitespace between binary operator '+'
+                           | and naked identifier. [layout.spacing]
+    L:   1 | P:  11 | LT01 | Expected only single space before 'AS' keyword. Found '
+                           | '. [layout.spacing]
+    L:   2 | P:   1 | LT02 | Expected indent of 4 spaces.
+                           | [layout.indent]
+    L:   2 | P:   9 | LT02 | Expected line break and no indent before 'from'.
+                           | [layout.indent]
+    L:   2 | P:  10 | CP01 | Keywords must be consistently upper case.
+                           | [capitalisation.keywords]
+    All Finished 📜 🎉!
 
 You'll see that *SQLFluff* has failed the linting check for this file.
 On each of the following lines you can see each of the problems it has
 found, with some information about the location and what kind of
 problem there is. One of the errors has been found on *line 1*, *position *
 (as shown by :code:`L:   1 | P:   9`) and it's a problem with rule
-*L006* (for a full list of rules, see :ref:`ruleref`). From this
+*LT01* (for a full list of rules, see :ref:`ruleref`). From this
 (and the following error) we can see that the problem is that there
 is no space either side of the :code:`+` symbol in :code:`a+b`.
 Head into the file, and correct this issue so that the file now
@@ -110,19 +123,27 @@ looks like this:
     c AS bar from my_table
 
 Rerun the same command as before, and you'll see that the original
-error (violation of *L006*) no longer shows up.
+error (violation of *LT01*) no longer shows up.
 
 .. code-block:: text
 
     $ sqlfluff lint test.sql --dialect ansi
     == [test.sql] FAIL
-    L:   1 | P:   1 | L034 | Select wildcards then simple targets before calculations
-                           | and aggregates.
-    L:   1 | P:   1 | L036 | Select targets should be on a new line unless there is
+    L:   1 | P:   1 | LT09 | Select targets should be on a new line unless there is
                            | only one select target.
-    L:   1 | P:  13 | L039 | Unnecessary whitespace found.
-    L:   2 | P:   1 | L003 | Expected 1 indentations, found 0 [compared to line 01]
-    L:   2 | P:  10 | L010 | Keywords must be consistently upper case.
+                           | [layout.select_targets]
+    L:   1 | P:   1 | ST06 | Select wildcards then simple targets before calculations
+                           | and aggregates. [structure.column_order]
+    L:   1 | P:   7 | LT02 | Expected line break and indent of 4 spaces before 'a'.
+                           | [layout.indent]
+    L:   1 | P:  13 | LT01 | Expected only single space before 'AS' keyword. Found '
+                           | '. [layout.spacing]
+    L:   2 | P:   1 | LT02 | Expected indent of 4 spaces.
+                           | [layout.indent]
+    L:   2 | P:   9 | LT02 | Expected line break and no indent before 'from'.
+                           | [layout.indent]
+    L:   2 | P:  10 | CP01 | Keywords must be consistently upper case.
+                           | [capitalisation.keywords]
 
 To fix the remaining issues, we're going to use one of the more
 advanced features of *SQLFluff*, which is the *fix* command. This
@@ -132,17 +153,23 @@ and there may be some situations where a fix may not be able to be
 applied because of the context of the query, but in many simple cases
 it's a good place to start.
 
-For now, we only want to fix the following rules: *L003*, *L009*, *L010*
+For now, we only want to fix the following rules: *LT02*, *LT12*, *CP01*
 
 .. code-block:: text
 
-    $ sqlfluff fix test.sql --rules L003,L009,L010 --dialect ansi
+    $ sqlfluff fix test.sql --rules LT02,LT12,CP01 --dialect ansi
     ==== finding violations ====
     == [test.sql] FAIL
-    L:   2 | P:   1 | L003 | Expected 1 indentations, found 0 [compared to line 01]
-    L:   2 | P:  10 | L010 | Keywords must be consistently upper case.
+    L:   1 | P:   7 | LT02 | Expected line break and indent of 4 spaces before 'a'.
+                           | [layout.indent]
+    L:   2 | P:   1 | LT02 | Expected indent of 4 spaces.
+                           | [layout.indent]
+    L:   2 | P:   9 | LT02 | Expected line break and no indent before 'FROM'.
+                           | [layout.indent]
+    L:   2 | P:  10 | CP01 | Keywords must be consistently upper case.
+                           | [capitalisation.keywords]
     ==== fixing violations ====
-    2 fixable linting violations found
+    4 fixable linting violations found
     Are you sure you wish to attempt to fix these? [Y/n]
 
 ...at this point you'll have to confirm that you want to make the
@@ -161,17 +188,17 @@ now different.
 
 .. code-block:: sql
 
-    SELECT a + b  AS foo,
-        c AS bar FROM my_table
+    SELECT
+        a + b  AS foo,
+        c AS bar
+    FROM my_table
 
 In particular:
 
-* The second line has been indented to reflect being inside the
+* The two columns have been indented to reflect being inside the
   :code:`SELECT` statement.
 * The :code:`FROM` keyword has been capitalised to match the
   other keywords.
-* A final newline character has been added at the end of the
-  file (which may not be obvious in the snippet above).
 
 We could also fix *all* of the fixable errors by not
 specifying :code:`--rules`.
@@ -181,13 +208,12 @@ specifying :code:`--rules`.
     $ sqlfluff fix test.sql --dialect ansi
     ==== finding violations ====
     == [test.sql] FAIL
-    L:   1 | P:   1 | L034 | Select wildcards then simple targets before calculations
-                           | and aggregates.
-    L:   1 | P:   1 | L036 | Select targets should be on a new line unless there is
-                           | only one select target.
-    L:   1 | P:  13 | L039 | Unnecessary whitespace found.
+    L:   1 | P:   1 | ST06 | Select wildcards then simple targets before calculations
+                           | and aggregates. [structure.column_order]
+    L:   2 | P:  10 | LT01 | Expected only single space before 'AS' keyword. Found '
+                           | '. [layout.spacing]
     ==== fixing violations ====
-    3 fixable linting violations found
+    2 fixable linting violations found
     Are you sure you wish to attempt to fix these? [Y/n] ...
     Attempting fixes...
     Persisting Changes...
@@ -234,14 +260,14 @@ put the following content:
     [sqlfluff:indentation]
     tab_space_size = 2
 
-    [sqlfluff:rules:L010]
+    [sqlfluff:rules:capitalisation.keywords]
     capitalisation_policy = lower
 
 Then rerun the same command as before.
 
 .. code-block:: text
 
-    $ sqlfluff fix test.sql --rules L003,L009,L010,L034,L036,L039
+    $ sqlfluff fix test.sql --rules LT02,LT12,CP01,ST06,LT09,LT01
 
 Then examine the file again, and you'll notice that the
 file has been fixed accordingly.
@@ -254,6 +280,8 @@ file has been fixed accordingly.
     from my_table
 
 For a full list of configuration options check out :ref:`defaultconfig`.
+Note that in our example here we've only set a few configuration values
+and any other configuration settings remain as per the default config.
 To see how these options apply to specific rules check out the
 "Configuration" section within each rule's documentation in :ref:`ruleref`.
 
@@ -273,6 +301,8 @@ From here, there are several more things to explore.
 * To find out more about which rules are available, see :ref:`ruleref`.
 * To find out more about configuring *SQLFluff* and what other options
   are available, see :ref:`config`.
+* Once you're ready to start using *SQLFluff* on a project or with the
+  rest of your team, check out :ref:`production-use`.
 
 One last thing to note is that *SQLFluff* is a relatively new project
 and you may find bugs or strange things while using it. If you do find
